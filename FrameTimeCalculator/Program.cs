@@ -9,8 +9,10 @@ namespace FrameTimeCalculator
 {
     internal class Program
     {
-        static string VideoPath     = string.Empty;
-        static string ComparePath   = string.Empty;
+        static  string  VideoPath           = string.Empty;
+        static  string  ComparePath         = string.Empty;
+        const   float   ThresholdDefault    = 0.6f;
+        static  float   Threshold           = ThresholdDefault;
 
         static readonly string DownloadPath = AppDomain.CurrentDomain.BaseDirectory;
 
@@ -83,6 +85,25 @@ namespace FrameTimeCalculator
             }
         }
 
+        static float GetThreshold()
+        {
+            Console.Clear();
+
+            while (true)
+            {
+                Console.Write($"Threshold (0.00 - 1.00) (How close the frame should match) (Default: {Threshold}): ");
+                string threshold = Console.ReadLine()?.Trim();
+
+                if (string.IsNullOrEmpty(threshold))
+                    return ThresholdDefault;
+
+                if (float.TryParse(threshold, out var result) && result >= 0f && result <= 1f)
+                    return result;
+
+                WriteError("Invalid Threshold...");
+            }
+        }
+
         static void WriteError(string message)
         {
             Console.Clear();
@@ -147,6 +168,8 @@ namespace FrameTimeCalculator
 
         static void ProcessVideo()
         {
+            Threshold = GetThreshold();
+
             Console.Clear();
 
             int     totalFoundFrames    = 0;
@@ -173,7 +196,7 @@ namespace FrameTimeCalculator
                         if (!video.Read(frame))
                             continue;
 
-                        if (found = CompareFrame(frame, compare, 0.6))
+                        if (found = CompareFrame(frame, compare, Threshold))
                         {
                             WriteProgressFrame(i);
                             totalFoundFrames++;
