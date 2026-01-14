@@ -14,17 +14,25 @@ namespace FrameTimeCalculator
         const   float   ThresholdDefault    = 0.6f;
         static  float   Threshold           = ThresholdDefault;
 
-        static readonly string DownloadPath = AppDomain.CurrentDomain.BaseDirectory;
+        static readonly string CurrentDirectory = AppDomain.CurrentDomain.BaseDirectory;
+
+        enum FrameState
+        {
+            NONE,
+            Found,
+            Waiting,
+            Ended
+        }
 
         static async Task<string> DownloadYouTubeVideo(string url)
         {
-            Console.WriteLine($"Downloading to \"{DownloadPath}\"...");
+            Console.WriteLine($"Downloading to \"{CurrentDirectory}\"...");
 
             var youtube         = YouTube.Default;
             YouTubeVideo video  = null;
 
             try { video = await youtube.GetVideoAsync(url); } catch { return null; }
-            string path = Path.Combine(DownloadPath, video.FullName);
+            string path = Path.Combine(CurrentDirectory, video.FullName);
             try { File.WriteAllBytes(path, video.GetBytes()); } catch { return null; }
 
             Console.WriteLine($"Download Complete");
@@ -173,53 +181,66 @@ namespace FrameTimeCalculator
             Console.Clear();
 
             int     totalFoundFrames    = 0;
-            double  fps                 = 30;
-            bool    found               = false;
-            bool    waiting             = false;
+            double  fps                 = 0;
 
-            List<(int, int)> framesFound = new List<(int, int)>();
-
+            List<FrameData> framesFound = new List<FrameData>();
+            
             using (var video        = new VideoCapture(VideoPath))                          {
             using (var compare      = Cv2.ImRead(ComparePath, ImreadModes.ReducedColor8))   {
             using (var frame        = new Mat())
+            using (var tempFrame    = new Mat())
             {
-                int frames      = video.FrameCount;
-                int frameStart  = 0;
+                int totalFrames = video.FrameCount;
                 fps             = video.Fps;
+                var frameState  = FrameState.NONE;
 
-                try
+                FrameData.Frame frameStart = default;
+                byte[] previousFrame = Array.Empty<byte>();
+
+                for (int i = 0; i < totalFrames; i++)
                 {
-                    for (int i = 0; i < frames; i++)
+                    WriteProgress(i, totalFrames);
+                    if (!video.Read(frame))
+                        break;
+
+                    if (ProcessFrame(frame, tempFrame, compare, i))
                     {
-                        WriteProgress(i, frames);
-
-                        if (!video.Read(frame))
-                            continue;
-
-                        if (found = CompareFrame(frame, compare, Threshold))
-                        {
-                            WriteProgressFrame(i);
-                            totalFoundFrames++;
-                        }
-
-                        if (found && !waiting)
-                        {
-                            frameStart = i;
-                            waiting = true;
-                        }
-                        else if (waiting && !found)
-                        {
-                            framesFound.Add((frameStart, i));
-                            waiting = false;
-                        }
+                        totalFoundFrames++;
+                        frameState = frameState == FrameState.NONE ? FrameState.Found : FrameState.Waiting;
                     }
-                } catch (Exception ex) { Console.Clear(); Console.WriteLine(ex); return; }
+                    else if (frameState == FrameState.Found || frameState == FrameState.Waiting)
+                    {
+                        frameState = FrameState.Ended;
+                    }
+
+                    switch (frameState)
+                    {
+                        case FrameState.Found:      frameStart      = new FrameData.Frame(i, previousFrame = frame.ImEncode()); break;
+                        case FrameState.Waiting:    /*previousFrame = frame.ImEncode();*/                                       break; // If wanting the ending frame, got to process each frame not knowing which will be the last one
+                        case FrameState.Ended:
+                            frameState = FrameState.NONE;
+                            framesFound.Add(new FrameData(frameStart, new FrameData.Frame(i, previousFrame)));
+                        break;
+                    }
+                }
             }}}
+
+            if (fps <= 0)
+                return;
 
             WriteResult(totalFoundFrames, fps, framesFound);
         }
 
-        static void WriteResult(int totalFoundFrames, double fps, List<(int, int)> framesFound)
+        static bool ProcessFrame(Mat frame, Mat tempFrame, Mat compare, int frameIndex)
+        {
+            if (!CompareFrame(frame, tempFrame, compare, Threshold))
+                return false;
+
+            WriteProgressFrame(frameIndex);
+            return true;
+        }
+
+        static void WriteResult(int totalFoundFrames, double fps, List<FrameData> framesFound)
         {
             Console.Clear();
 
@@ -227,9 +248,11 @@ namespace FrameTimeCalculator
 
             foreach (var frameFound in framesFound)
             {
-                var timeStart   = TimeSpan.FromSeconds(frameFound.Item1 / fps);
-                var timeTook    = TimeSpan.FromSeconds(frameFound.Item2 / fps) - timeStart;
+                var timeStart   = TimeSpan.FromSeconds(frameFound.StartingFrame.FrameIndex / fps);
+                var timeTook    = TimeSpan.FromSeconds(frameFound.Length / fps);
                 Console.WriteLine($"{FormatTimeSpan(timeStart, false)} (for {FormatTimeSpan(timeTook)} seconds)");
+
+                FrameData.TryExportFrame(frameFound.StartingFrame, Path.Combine(CurrentDirectory, "Snapshots", $"{Path.GetFileNameWithoutExtension(VideoPath).Trim().Replace(" ", "_")}"), $"Frame{frameFound.StartingFrame.FrameIndex}_{timeStart.Hours:00}-{timeStart.Minutes:00}-{timeStart.Seconds:00}");
             }
 
             Console.WriteLine($"----------");
@@ -250,12 +273,20 @@ namespace FrameTimeCalculator
             Console.Write($"Adding frame at {frame}...");
         }
 
-        static bool CompareFrame(Mat frame, Mat compare, double threshold, TemplateMatchModes compareMethod = TemplateMatchModes.CCoeffNormed)
+        static bool CompareFrame(Mat frame, Mat tempFrame, Mat compare, double threshold, TemplateMatchModes compareMethod = TemplateMatchModes.CCoeffNormed)
         {
-            Cv2.Resize(frame, frame, new Size(compare.Width, compare.Height));
-            try { Cv2.MatchTemplate(frame, compare, frame, compareMethod); } catch { return false; }
-            Cv2.MinMaxLoc(frame, out _, out double value, out _, out _);
-            return value >= threshold;
+            try
+            {
+                Cv2.Resize(frame, tempFrame, new Size(compare.Width, compare.Height));
+                Cv2.MatchTemplate(tempFrame, compare, tempFrame, compareMethod);
+                Cv2.MinMaxLoc(tempFrame, out _, out double value, out _, out _);
+                return value >= threshold;
+            }
+            catch (Exception ex)
+            {
+                WriteError(ex.Message);
+                return false;
+            }
         }
 
         static string FormatTimeSpan(TimeSpan timeSpan, bool justSeconds = true)
